@@ -1,0 +1,227 @@
+name: build
+on: [workflow_dispatch, push]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.9
+      - name: Generate project and build
+        run: |
+          cat > settings.gradle.kts <<'EOF'
+          pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
+          dependencyResolutionManagement { repositories { google(); mavenCentral() } }
+          rootProject.name = "ShutterMute"
+          include(":app")
+          EOF
+          cat > build.gradle.kts <<'EOF'
+          plugins {
+              id("com.android.application") version "8.7.3" apply false
+              id("org.jetbrains.kotlin.android") version "2.0.21" apply false
+          }
+          EOF
+          mkdir -p app
+          cat > app/build.gradle.kts <<'EOF'
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+          }
+          android {
+              namespace = "com.example.shuttermute"
+              compileSdk = 35
+              defaultConfig {
+                  applicationId = "com.example.shuttermute"
+                  minSdk = 29
+                  targetSdk = 35
+                  versionCode = 1
+                  versionName = "1.0"
+              }
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+              kotlinOptions { jvmTarget = "17" }
+          }
+          EOF
+          mkdir -p app/src/main
+          cat > app/src/main/AndroidManifest.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.WRITE_SETTINGS" />
+              <uses-permission android:name="android.permission.WRITE_SECURE_SETTINGS" />
+              <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+
+              <application
+                  android:label="무음 셔터"
+                  android:theme="@android:style/Theme.DeviceDefault.DayNight">
+
+                  <activity android:name=".MainActivity" android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+
+                  <receiver android:name=".BootReceiver" android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.BOOT_COMPLETED" />
+                          <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+                      </intent-filter>
+                  </receiver>
+
+                  <service
+                      android:name=".ToggleTile"
+                      android:exported="true"
+                      android:icon="@drawable/ic_tile"
+                      android:label="무음 셔터"
+                      android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
+                      <intent-filter>
+                          <action android:name="android.service.quicksettings.action.QS_TILE" />
+                      </intent-filter>
+                  </service>
+              </application>
+          </manifest>
+          EOF
+          mkdir -p app/src/main/res/drawable
+          cat > app/src/main/res/drawable/ic_tile.xml <<'EOF'
+          <vector xmlns:android="http://schemas.android.com/apk/res/android"
+              android:width="24dp" android:height="24dp"
+              android:viewportWidth="24" android:viewportHeight="24">
+              <path android:fillColor="#FFFFFFFF"
+                  android:pathData="M9,3L7.17,5H4C2.9,5 2,5.9 2,7v12c0,1.1 0.9,2 2,2h16c1.1,0 2,-0.9 2,-2V7c0,-1.1 -0.9,-2 -2,-2h-3.17L15,3H9zM12,18c-2.76,0 -5,-2.24 -5,-5s2.24,-5 5,-5 5,2.24 5,5 -2.24,5 -5,5z"/>
+          </vector>
+          EOF
+          mkdir -p app/src/main/java/com/example/shuttermute
+          cat > app/src/main/java/com/example/shuttermute/App.kt <<'EOF'
+          package com.example.shuttermute
+
+          import android.app.Activity
+          import android.content.BroadcastReceiver
+          import android.content.Context
+          import android.content.Intent
+          import android.content.pm.PackageManager
+          import android.net.Uri
+          import android.os.Bundle
+          import android.provider.Settings
+          import android.service.quicksettings.Tile
+          import android.service.quicksettings.TileService
+          import android.view.Gravity
+          import android.widget.Button
+          import android.widget.LinearLayout
+          import android.widget.Switch
+          import android.widget.TextView
+
+          object ShutterMuter {
+              const val KEY = "csc_pref_camera_forced_shuttersound_key"
+              private const val PREFS = "prefs"
+              private const val WANT_MUTE = "want_mute"
+
+              fun hasPermission(c: Context) =
+                  Settings.System.canWrite(c) ||
+                      c.checkSelfPermission("android.permission.WRITE_SECURE_SETTINGS") == PackageManager.PERMISSION_GRANTED
+
+              fun isMuted(c: Context) = Settings.System.getInt(c.contentResolver, KEY, 1) == 0
+
+              fun wantMute(c: Context) = c.getSharedPreferences(PREFS, 0).getBoolean(WANT_MUTE, false)
+
+              fun set(c: Context, mute: Boolean): String? {
+                  c.getSharedPreferences(PREFS, 0).edit().putBoolean(WANT_MUTE, mute).apply()
+                  if (!hasPermission(c)) return "권한이 없습니다 (시스템 설정 수정 허용 필요)"
+                  return try {
+                      Settings.System.putInt(c.contentResolver, KEY, if (mute) 0 else 1)
+                      if (isMuted(c) == mute) null else "값을 써도 반영되지 않았습니다 (이 기기에서 해당 키가 막혀 있을 수 있음)"
+                  } catch (e: Exception) {
+                      "실패: ${e.javaClass.simpleName} ${e.message}"
+                  }
+              }
+
+              fun reapply(c: Context) {
+                  if (wantMute(c) && !isMuted(c)) set(c, true)
+              }
+          }
+
+          class BootReceiver : BroadcastReceiver() {
+              override fun onReceive(context: Context, intent: Intent) {
+                  ShutterMuter.reapply(context)
+              }
+          }
+
+          class ToggleTile : TileService() {
+              override fun onStartListening() = refresh()
+
+              override fun onClick() {
+                  ShutterMuter.set(this, !ShutterMuter.isMuted(this))
+                  refresh()
+              }
+
+              private fun refresh() {
+                  val t = qsTile ?: return
+                  t.state = if (ShutterMuter.isMuted(this)) Tile.STATE_ACTIVE else Tile.STATE_INACTIVE
+                  t.label = "무음 셔터"
+                  t.updateTile()
+              }
+          }
+
+          class MainActivity : Activity() {
+              private lateinit var toggle: Switch
+              private lateinit var status: TextView
+              private lateinit var permBtn: Button
+
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  val pad = (24 * resources.displayMetrics.density).toInt()
+                  val root = LinearLayout(this).apply {
+                      orientation = LinearLayout.VERTICAL
+                      setPadding(pad, pad * 2, pad, pad)
+                  }
+                  toggle = Switch(this).apply {
+                      text = "카메라 셔터음 끄기"
+                      textSize = 20f
+                      gravity = Gravity.CENTER_VERTICAL
+                  }
+                  status = TextView(this).apply { textSize = 14f; setPadding(0, pad, 0, 0) }
+                  root.addView(toggle)
+                  permBtn = Button(this).apply {
+                      text = "시스템 설정 수정 허용하기"
+                      setOnClickListener {
+                          startActivity(Intent(Settings.ACTION_MANAGE_WRITE_SETTINGS, Uri.parse("package:$packageName")))
+                      }
+                  }
+                  root.addView(permBtn)
+                  root.addView(status)
+                  setContentView(root)
+              }
+
+              override fun onResume() {
+                  super.onResume()
+                  refresh()
+              }
+
+              private fun refresh(message: String? = null) {
+                  toggle.setOnCheckedChangeListener(null)
+                  toggle.isChecked = ShutterMuter.isMuted(this)
+                  toggle.setOnCheckedChangeListener { _, checked ->
+                      refresh(ShutterMuter.set(this, checked))
+                  }
+                  permBtn.visibility = if (ShutterMuter.hasPermission(this)) android.view.View.GONE else android.view.View.VISIBLE
+                  val sb = StringBuilder()
+                  if (!ShutterMuter.hasPermission(this)) {
+                      sb.append("먼저 아래 버튼으로 '시스템 설정 수정'을 허용하세요.\n\n")
+                  }
+                  if (message != null) sb.append("⚠ ").append(message).append("\n\n")
+                  sb.append("현재 상태: ").append(if (ShutterMuter.isMuted(this)) "무음" else "셔터음 켜짐")
+                  sb.append("\n(부팅/업데이트 후 자동 복구됨, 퀵패널 타일로도 전환 가능)")
+                  status.text = sb
+              }
+          }
+          EOF
+          gradle assembleDebug --no-daemon
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ShutterMute-apk
+          path: app/build/outputs/apk/debug/app-debug.apk
